@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WalletGuard Inspector</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --txt:#e6edf3; --mut:#8b949e;
+          --red:#f85149; --yel:#d29922; --grn:#3fb950; --acc:#2f81f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.6 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif; }
+  .wrap { max-width:860px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:24px; margin:0; }
+  p.sub { color:var(--mut); margin:8px 0 16px; }
+  textarea { width:100%; min-height:190px; background:var(--panel); color:var(--txt); border:1px solid var(--line);
+             border-radius:10px; padding:12px; font:13px/1.5 ui-monospace,Consolas,monospace; resize:vertical; }
+  .row { display:flex; gap:8px; margin:12px 0 20px; flex-wrap:wrap; }
+  button { background:var(--panel); color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:8px 16px; cursor:pointer; font:inherit; }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
+  button:hover { filter:brightness(1.15); }
+  .verdict { padding:14px 16px; border-radius:10px; font-weight:700; margin-bottom:12px; }
+  .verdict.danger { background:rgba(248,81,73,.15); border:1px solid var(--red); color:var(--red); }
+  .verdict.warn   { background:rgba(210,153,34,.15); border:1px solid var(--yel); color:var(--yel); }
+  .verdict.info   { background:rgba(63,185,80,.12); border:1px solid var(--grn); color:var(--grn); }
+  .card { display:flex; gap:10px; background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:10px 14px; margin-bottom:8px; border-left:4px solid var(--line); }
+  .card.danger { border-left-color:var(--red); }
+  .card.warn   { border-left-color:var(--yel); }
+  .card.info   { border-left-color:var(--grn); }
+  code { background:#0b0f14; padding:1px 6px; border-radius:5px; font-size:12.5px; word-break:break-all; }
+  .tips { margin-top:18px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 16px; }
+  .tips ul { margin:6px 0 0; padding-left:20px; }
+  footer { margin-top:28px; color:var(--mut); font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛡 WalletGuard Inspector</h1>
+  <p class="sub">Paste a transaction, calldata, or signature request (EIP-712) to see what it really does before you sign. Runs 100% locally: nothing leaves your browser.</p>
+  <textarea id="input" spellcheck="false"
+    placeholder='Paste 0x… calldata, a transaction JSON {"to","value","data"}, an EIP-712 typed-data JSON, or a wallet request {"method","params"}…'></textarea>
+  <div class="row">
+    <button class="primary" id="analyze">Analyze</button>
+    <button id="sample">Load example</button>
+    <button id="clear">Clear</button>
+  </div>
+  <div id="result"></div>
+  <footer>Free &amp; open source. WalletGuard Inspector never asks for your seed phrase or private key, and makes no network requests.</footer>
+</div>
+
+<script>
+"use strict";
+
+// ---------------- messages ----------------
+const MSG = {
+  empty: "Paste something to analyze first.",
+  badInput: "Could not recognize this input. Paste hex calldata (0x…), a transaction JSON, or EIP-712 typed data.",
+  verdict_danger: "⛔ HIGH RISK: do not sign unless you fully trust the recipient address.",
+  verdict_warn: "⚠️ CAUTION: review every detail below before signing.",
+  verdict_info: "✅ No known drainer pattern detected. Still verify the website URL.",
+  unlimited: "UNLIMITED", never: "never (no expiry)", raw: "{0} (raw units)",
+  f_contract: "Interacting with contract {0}.",
+  f_value: "Sends {0} of the native coin (ETH / BNB / MATIC…).",
+  f_plain: "No contract data: plain native coin transfer to {0}.",
+  f_approve_unl: "Grants {0} <b>UNLIMITED</b> permission to spend this token from your wallet. This is the #1 drainer technique.",
+  f_approve: "Grants {0} permission to spend {1} of this token. (For NFTs, this approves token ID {1}.)",
+  f_approve_zero: "Sets the allowance of {0} to zero: this is a revoke. Safe.",
+  f_incr: "Increases the spending allowance of {0} by {1}.",
+  f_setall_on: "Gives {0} control over <b>ALL</b> your NFTs in this collection. Drainers use this to empty NFT wallets.",
+  f_setall_off: "Removes {0} as operator for this collection: this is a revoke. Safe.",
+  f_transfer: "Sends {1} tokens to {0}.",
+  f_transferFrom: "Moves an asset (amount / ID {2}) from {0} to {1}. Make sure {1} is who you expect.",
+  f_permit_call: "Submits a permit: owner {0} allows {1} to spend {2}.",
+  f_multicall: "Bundles several actions into one transaction. Hidden steps are common in drainer contracts.",
+  f_multicall_hidden: "The bundle appears to contain a <b>{0}</b> call.",
+  f_unknown: "Unknown function {0}. It cannot be decoded here: verify the contract on a block explorer before signing.",
+  f_ethsign: "Blind signature of a raw 32-byte hash (eth_sign). You cannot see what you are approving, and it may authorize ANY action. Never sign this on a website.",
+  f_personal: "Plain-text message signature. Usually used for login and cannot move funds by itself. Read the text and confirm the site is genuine.",
+  f_domain: "Requested by {0} on chain {1}, contract {2}.",
+  f_p2: 'Permit2 signature ({0}): authorizes {1} to move your tokens with NO transaction and NO gas. Drainers love this because it looks like a harmless "sign in".',
+  f_p2_token: "Token {0}: amount {1}.",
+  f_p2_contract: "The verifying contract {0} is NOT the official Permit2 address.",
+  f_permit: "Permit signature: allows {0} to spend {1} of the token at {2} without any further confirmation from you.",
+  f_dai: "DAI-style permit granting {0} <b>unlimited</b> spending.",
+  f_dai_off: "DAI-style permit removing the allowance of {0}: this is a revoke.",
+  f_deadline: "Valid until {0}. A very long validity means the permission can be used far into the future.",
+  f_seaport: "Marketplace order (Seaport). Drainers use fake listings that sell your NFTs for almost nothing.",
+  f_seaport_recv: "A payment item goes to {0} instead of the seller {1}. Confirm it is only a marketplace or creator fee.",
+  f_typed: "Typed-data signature {0}. Not a known drainer pattern, but only sign if you trust the website."
+};
+const TIPS = [
+  "Check the website URL letter by letter.",
+  "Never grant unlimited approvals to addresses you don't recognize.",
+  "Look up unknown spender addresses on a block explorer.",
+  "Revoke approvals you no longer need.",
+  "No legitimate site or support agent will ever ask for your seed phrase."
+];
+const t = (k, ...a) => (MSG[k] ?? k).replace(/\{(\d)\}/g, (_, i) => a[i] ?? "");
+
+// ---------------- helpers ----------------
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const code = s => `<code>${esc(s)}</code>`;
+const UNL = 1n << 128n; // anything above this is effectively unlimited
+const PERMIT2 = "0x000000000022d473030f116ddee9f6b43ac78ba3";
+const SEL = {
+  "0x095ea7b3": "approve",
+  "0x39509351": "increaseAllowance",
+  "0xa22cb465": "setApprovalForAll",
+  "0xa9059cbb": "transfer",
+  "0x23b872dd": "transferFrom",
+  "0x42842e0e": "safeTransferFrom",
+  "0xb88d4fde": "safeTransferFrom",
+  "0xd505accf": "permit",
+  "0xac9650d8": "multicall",
+  "0x5ae401dc": "multicall"
+};
+const RISKY_IN_BUNDLE = ["0x095ea7b3", "0x39509351", "0xa22cb465", "0x23b872dd", "0xd505accf"];
+
+function big(x) {
+  try {
+    if (x === null || x === undefined || x === "") return null;
+    if (typeof x === "boolean") return x ? 1n : 0n;
+    if (typeof x === "number") return BigInt(Math.trunc(x));
+    return BigInt(String(x).trim());
+  } catch { return null; }
+}
+const isUnl = x => { const v = big(x); return v !== null && v >= UNL; };
+function amt(x) {
+  const v = big(x);
+  if (v === null) return code(String(x ?? "?"));
+  return v >= UNL ? `<b>${t("unlimited")}</b>` : t("raw", code(v.toString()));
+}
+function when(x) {
+  const v = big(x);
+  if (v === null) return "?";
+  if (v >= 10n ** 12n) return t("never");
+  return code(new Date(Number(v) * 1000).toISOString().slice(0, 10));
+}
+const longExpiry = x => {
+  const v = big(x);
+  return v !== null && v > BigInt(Math.floor(Date.now() / 1000)) + 31536000n; // > 1 year
+};
+function fmtNative(v) {
+  const s = v.toString().padStart(19, "0");
+  const frac = s.slice(-18).replace(/0+$/, "");
+  return s.slice(0, -18) + "." + (frac || "0");
+}
+
+// ---------------- analyzers ----------------
+function analyzeCalldata(data, to, value, F) {
+  data = String(data || "0x").toLowerCase();
+  if (!/^0x[0-9a-f]*$/.test(data)) return false;
+  const v = big(value);
+  if (v && v > 0n) F.push(["warn", "f_value", code(fmtNative(v))]);
+  if (data.length < 10) { F.push(["info", "f_plain", code(to || "?")]); return true; }
+  if (to) F.push(["info", "f_contract", code(to)]);
+
+  const sel = data.slice(0, 10), body = data.slice(10), w = [];
+  for (let i = 0; i + 64 <= body.length; i += 64) w.push(body.slice(i, i + 64));
+  const A = i => code(w[i] ? "0x" + w[i].slice(24) : "?");
+  const U = i => (w[i] ? BigInt("0x" + w[i]) : null);
+
+  switch (SEL[sel]) {
+    case "approve": {
+      const a = U(1);
+      if (a === 0n) F.push(["info", "f_approve_zero", A(0)]);
+      else if (a !== null && a >= UNL) F.push(["danger", "f_approve_unl", A(0)]);
+      else F.push(["warn", "f_approve", A(0), code(a?.toString() ?? "?")]);
+      break;
+    }
+    case "increaseAllowance":
+      F.push([isUnl(U(1)) ? "danger" : "warn", "f_incr", A(0), amt(U(1))]);
+      break;
+    case "setApprovalForAll":
+      if (U(1) === 1n) F.push(["danger", "f_setall_on", A(0)]);
+      else F.push(["info", "f_setall_off", A(0)]);
+      break;
+    case "transfer":
+      F.push(["warn", "f_transfer", A(0), amt(U(1))]);
+      break;
+    case "transferFrom":
+    case "safeTransferFrom":
+      F.push(["warn", "f_transferFrom", A(0), A(1), code(U(2)?.toString() ?? "?")]);
+      break;
+    case "permit":
+      F.push(["danger", "f_permit_call", A(0), A(1), amt(U(2))]);
+      if (longExpiry(U(3))) F.push(["warn", "f_deadline", when(U(3))]);
+      break;
+    case "multicall":
+      F.push(["warn", "f_multicall"]);
+      RISKY_IN_BUNDLE.forEach(s => { if (body.includes(s.slice(2))) F.push(["warn", "f_multicall_hidden", esc(SEL[s])]); });
+      break;
+    default:
+      F.push(["warn", "f_unknown", code(sel)]);
+  }
+  return true;
+}
+
+function analyzeTyped(td, F) {
+  const m = td.message || {}, d = td.domain || {}, pt = String(td.primaryType || "");
+  F.push(["info", "f_domain", code(d.name ?? "?"), code(d.chainId ?? "?"), code(d.verifyingContract ?? "?")]);
+
+  if (/^Permit(Single|Batch|TransferFrom|BatchTransferFrom|WitnessTransferFrom|BatchWitnessTransferFrom)$/.test(pt)) {
+    F.push(["danger", "f_p2", esc(pt), code(m.spender ?? "?")]);
+    const det = m.details ?? m.permitted;
+    const list = Array.isArray(det) ? det : det ? [det] : [];
+    list.forEach(x => F.push([isUnl(x.amount) ? "danger" : "warn", "f_p2_token", code(x.token ?? "?"), amt(x.amount)]));
+    const exps = [m.sigDeadline, m.deadline, ...list.map(x => x.expiration)].filter(x => x !== undefined);
+    const far = exps.find(longExpiry);
+    if (far !== undefined) F.push(["warn", "f_deadline", when(far)]);
+    if (d.verifyingContract && String(d.verifyingContract).toLowerCase() !== PERMIT2)
+      F.push(["danger", "f_p2_contract", code(d.verifyingContract)]);
+    return;
+  }
+  if (pt === "Permit") {
+    if ("allowed" in m) {
+      if (m.allowed === true || m.allowed === "true") F.push(["danger", "f_dai", code(m.spender ?? "?")]);
+      else F.push(["info", "f_dai_off", code(m.spender ?? "?")]);
+    } else {
+      F.push([isUnl(m.value) || big(m.value) > 0n ? "danger" : "info", "f_permit",
+              code(m.spender ?? "?"), amt(m.value), code(d.verifyingContract ?? "?")]);
+    }
+    const exp = m.deadline ?? m.expiry;
+    if (longExpiry(exp)) F.push(["warn", "f_deadline", when(exp)]);
+    return;
+  }
+  if (pt === "OrderComponents") {
+    F.push(["danger", "f_seaport"]);
+    const off = String(m.offerer || "").toLowerCase();
+    (m.consideration || []).forEach(c => {
+      if (String(c.recipient || "").toLowerCase() !== off)
+        F.push(["warn", "f_seaport_recv", code(c.recipient ?? "?"), code(m.offerer ?? "?")]);
+    });
+    return;
+  }
+  F.push(["info", "f_typed", code(pt || "?")]);
+}
+
+function handleJson(j, F) {
+  if (typeof j === "string") { try { return handleJson(JSON.parse(j), F); } catch { return false; } }
+  if (Array.isArray(j)) return j.some(x => handleJson(x, F));
+  if (!j || typeof j !== "object") return false;
+  if (j.method) {
+    if (j.method === "eth_sign") { F.push(["danger", "f_ethsign"]); return true; }
+    if (j.method === "personal_sign") { F.push(["info", "f_personal"]); return true; }
+    return handleJson(j.params || [], F);
+  }
+  if (j.types && j.primaryType) { analyzeTyped(j, F); return true; }
+  if ("data" in j || "input" in j || "to" in j) return analyzeCalldata(j.data ?? j.input ?? "0x", j.to, j.value, F);
+  return false;
+}
+
+function analyze(raw) {
+  const s = raw.trim(), F = [];
+  if (!s) return null;
+  if (/^0x[0-9a-fA-F]{64}$/.test(s)) { F.push(["danger", "f_ethsign"]); return F; }
+  if (/^0x[0-9a-fA-F]*$/.test(s)) { analyzeCalldata(s, null, null, F); return F; }
+  let j;
+  try { j = JSON.parse(s); } catch { F.push(["info", "f_personal"]); return F; }
+  if (!handleJson(j, F)) return "bad";
+  return F;
+}
+
+// ---------------- UI ----------------
+let last = null;
+const ICON = { danger: "⛔", warn: "⚠️", info: "ℹ️" };
+
+function render() {
+  const r = $("result");
+  if (last === null) { r.innerHTML = ""; return; }
+  if (last === "empty" || last === "bad") {
+    r.innerHTML = `<div class="verdict warn">${t(last === "empty" ? "empty" : "badInput")}</div>`;
+    return;
+  }
+  const rank = { info: 0, warn: 1, danger: 2 };
+  const lv = ["info", "warn", "danger"][last.reduce((a, f) => Math.max(a, rank[f[0]]), 0)];
+  r.innerHTML =
+    `<div class="verdict ${lv}">${t("verdict_" + lv)}</div>` +
+    last.map(([l, k, ...a]) => `<div class="card ${l}"><span>${ICON[l]}</span><div>${t(k, ...a)}</div></div>`).join("") +
+    `<div class="tips"><b>Before you sign:</b><ul>${TIPS.map(x => `<li>${x}</li>`).join("")}</ul></div>`;
+}
+
+// Demo samples (fake attacker address)
+const BAD = "0xbadbadbadbadbadbadbadbadbadbadbadbadbad0";
+const PAD = "0".repeat(24) + BAD.slice(2);
+const SAMPLES = [
+  JSON.stringify({ to: "0xdAC17F958D2ee523a2206206994597C13D831ec7", value: "0x0",
+                   data: "0x095ea7b3" + PAD + "f".repeat(64) }, null, 2),
+  JSON.stringify({
+    types: {
+      PermitSingle: [{ name: "details", type: "PermitDetails" }, { name: "spender", type: "address" }, { name: "sigDeadline", type: "uint256" }],
+      PermitDetails: [{ name: "token", type: "address" }, { name: "amount", type: "uint160" }, { name: "expiration", type: "uint48" }, { name: "nonce", type: "uint48" }]
+    },
+    primaryType: "PermitSingle",
+    domain: { name: "Permit2", chainId: 1, verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3" },
+    message: {
+      details: { token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", amount: "1461501637330902918203684832716283019655932542975",
+                 expiration: "281474976710655", nonce: "0" },
+      spender: BAD, sigDeadline: "281474976710655"
+    }
+  }, null, 2),
+  "0xa22cb465" + PAD + "0".repeat(63) + "1"
+];
+let sampleIdx = 0;
+
+$("analyze").onclick = () => { last = analyze($("input").value) ?? "empty"; render(); };
+$("sample").onclick = () => { $("input").value = SAMPLES[sampleIdx++ % SAMPLES.length]; $("analyze").click(); };
+$("clear").onclick = () => { $("input").value = ""; last = null; render(); };
+</script>
+</body>
+</html>
