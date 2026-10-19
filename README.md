@@ -54,7 +54,7 @@ Everything happens inside your browser with standard JavaScript. Nothing is uplo
 
 ## 🚀 Usage
 
-**Online:** open the [live version](https://astapyth.github.io/walletguard-inspector/).
+**Online:** open the [live version](https://astapyth.github.io/walletguard-inspector/index.html).
 
 **Offline:** download `index.html` and open it in any modern browser. No installation needed.
 
